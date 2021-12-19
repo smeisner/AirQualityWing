@@ -10,6 +10,7 @@ supplies onboard wifi. The wifi allows for MQTT publiching to a broker.
 
 Info on the HUZZAH32 can be found anywhere on the internet, but Adafruit has some good details.
 - https://learn.adafruit.com/adafruit-huzzah32-esp32-feather
+- https://makeabilitylab.github.io/physcomp/esp32/assets/images/AdafruitHuzzah32PinDiagram.png
 
 The Air Quality Wing (aka, AQW) is a Feather board desgined and built by Jared Wolff. This makes\
 for a nice plug and play...especialy with the 3D printed case he made for it.
