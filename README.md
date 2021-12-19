@@ -8,28 +8,28 @@ Air Quality Wing with HUZZAH32 uController
 The HUZZAH32 board is one of the few that has the Fetaher foot print and\
 supplies onboard wifi. The wifi allows for MQTT publiching to a broker.
 
-Info on the HUZZAH32 can be found anywhere on the internet, but Adafruit has some good details.\
-```https://learn.adafruit.com/adafruit-huzzah32-esp32-feather```
+Info on the HUZZAH32 can be found anywhere on the internet, but Adafruit has some good details.
+- https://learn.adafruit.com/adafruit-huzzah32-esp32-feather
 
 The Air Quality Wing (aka, AQW) is a Feather board desgined and built by Jared Wolff. This makes\
 for a nice plug and play...especialy with the 3D printed case he made for it.
 
-Feather spec:\
-```https://learn.adafruit.com/adafruit-feather/feather-specification```
+Feather spec:
+- https://learn.adafruit.com/adafruit-feather/feather-specification
 
 Originally, Jared designed his software around the Partice line of boards, but Particle focuses\
 more on cellular connection instead of wifi, which is what I needed.
 
-Details on the Particle Xenon board can be found here:\
-```https://docs.particle.io/datasheets/discontinued/xenon-datasheet/```
+Details on the Particle Xenon board can be found here:
+- https://docs.particle.io/datasheets/discontinued/xenon-datasheet/
 
 ```WARNING:``` Much of the online info I found related to the AQW specifies the CCS811 (which\
 was replaced with the SHTC3 on V6 AQW), the Si7021 (which was replaced with the AGP40 on V6  AQW).\
 The HPMA115 is still used. As of Dec-2021, the current PCB version of the AQW is Version 6.
 
 Details on the AQW can be found on Jared's web site:
-- [Specs] https://www.jaredwolff.com/documentation/air-quality-wing/ \
-- [Buy] https://www.jaredwolff.com/store/air-quality-wing/ \
+- [Specs] https://www.jaredwolff.com/documentation/air-quality-wing/
+- [Buy] https://www.jaredwolff.com/store/air-quality-wing/
 - [Old] https://www.jaredwolff.com/homemade-indoor-air-quality-sensor/
 
 On Github at: ```[[ WARNING: This is for the Particle dev environment ]]```
@@ -40,7 +40,7 @@ On Github at: ```[[ WARNING: This is for the Particle dev environment ]]```
 - https://github.com/circuitdojo/air-quality-wing-zephyr-demo
 - https://github.com/circuitdojo/air-quality-wing-zephyr-drivers
 
-Code I used to process the HPM info came from:\
+Code I used to process the HPM info came from:
 - https://medium.com/@boonsanti/esp32-air-quality-measurement-pm2-5-pm10-with-honeywell-hpma115s0-55f411d08fca
 
 
