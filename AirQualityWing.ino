@@ -88,6 +88,18 @@
  *    - Manually download zip from repo and add to Arduino IDE
  *      https://github.com/felixgalindo/HPMA115S0.git
  *      [Possible alternative: https://github.com/jedp/PMSensor-HPMA115]
+ *      
+ * To support OTA updates;
+ * ArduinoOTA
+ *    - Installed by name via the IDE Library Manager
+ *      https://github.com/jandrassy/ArduinoOTA
+ * TelnetStream
+ *    - Installed by name via IDE Library Manager
+ *      https://github.com/jandrassy/TelnetStream
+ * Logger
+ *    - Installed by name via IDE Library Manager
+ *      https://github.com/bakercp/Logger
+ * 
  * 
  * I2C Addresses:
  *  - SHTC3 0x70
@@ -109,33 +121,38 @@
 #include <HardwareSerial.h>
 #include "Adafruit_SGP40.h"
 #include "Adafruit_SHTC3.h"
+// OTA
+#include "OTA.h"
+#include <TelnetStream.h>
+#include <Logger.h>
+// Secret credentials
+#include "arduino_secrets.h"
 
+// Network credentials (set in arduino_secrets.h)
+const char ssid[] = SECRET_SSID;
+const char password[] = SECRET_PASS;
+const char* mqtt_server = SECRET_MQTT_BROKER;
+
+#define BANNER "HUZZAH32 Feather/Air Quality Wing -- V1.5"
+
+// Global device structs
+WiFiClient aqwClient;
+PubSubClient mqttClient(aqwClient);
 Adafruit_SGP40 sgp;
 Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
+HardwareSerial HPMA115S0(1);  // Use the builtin UART
 
-// Update these with values suitable for your network.
-const char* mqtt_server = "mqtt.local";
-const char* ssid = "wifi-ssid";
-const char* password = "wifi-password";
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-#define BANNER "Feather/HUZZAH32/Air Quality Wing -- V1.4"
-
-const int ledPin = BUILTIN_LED; // Onboard LED to indicate activity
-#define INTERVAL 30           // Interval to take readings (seconds)
+#define INTERVAL 60           // Interval to take readings (seconds)
+#define LOGMSG_LEN 64         // Size of log message scratch buffer
+char logMsg[LOGMSG_LEN];      // General use buffer for log messages
 char mqtt_pub[50];            // Buffer for MQTT msg published
-long lastMsg = 0;             // Timestamp of last loop() pass
-
 
 //
 // Air Quality Wing related details
 //
-
 // Set up sensor enable PIN
 #define SENS_EN_PIN A8        // Enable pin for builtin AQW power supply (which provides 5V)
-// HPM Sensor vriables
-HardwareSerial HPMA115S0(1);  // Use the builtin UART
+// HPM Sensor definitions
 #define RXD2 16               // Pin assigments for onboard UART
 #define TXD2 17
 #define HPMA1150_EN_PIN A9    // Enable pin for HPM sensor
@@ -143,66 +160,119 @@ HardwareSerial HPMA115S0(1);  // Use the builtin UART
 
 //////////////////////////////////////////////////
 ///                                            ///
-///               Code Start                   ///
+///          Arduino Code Start                ///
 ///                                            ///
 //////////////////////////////////////////////////
 
 void setup()
 {
+  // Turn on LED during setup()
+  pinMode(BUILTIN_LED, OUTPUT);
+  digitalWrite(BUILTIN_LED, HIGH);
+
   Serial.begin(115200);
   while (!Serial) delay(100);
 
-  delay(200);
-  Serial.println(BANNER);
-  Serial.println("Enabling HPM Sensor...");
+  setupOTA("AirQualityWing", ssid, password);
+  TelnetStream.begin();
+
+  Logger::setLogLevel(Logger::NOTICE);
+  Logger::setOutputFunction(localLogger);
+  delay(5000);
+
+  Logger::notice(BANNER);
+
+  IPAddress ip = WiFi.localIP();
+  Logger::notice("Connected to WiFi network. Connect with Telnet client to: ");
+  snprintf (logMsg, LOGMSG_LEN, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  Logger::notice(logMsg);
+
+  Logger::verbose("Connecting to MQTT broker");
+  mqttClient.setServer(mqtt_server, 1883);
+
+  Logger::verbose("Enabling HPM Sensor...");
   pinMode(HPMA1150_EN_PIN, OUTPUT);
   digitalWrite(HPMA1150_EN_PIN, HIGH);
-  Serial.println("Enabling Sensor power...");
+
+  Logger::verbose("Enabling Sensor power...");
   pinMode(SENS_EN_PIN, OUTPUT);
   digitalWrite(SENS_EN_PIN, HIGH);
 
-  pinMode(ledPin, OUTPUT);
-  digitalWrite(ledPin, HIGH);
-
-  setup_wifi();
-  Serial.println("Connecting to MQTT broker");
-  client.setServer(mqtt_server, 1883);
-
-  Serial.println("Connecting to HPM sensor");
+  Logger::verbose("Connecting to HPM sensor");
   hpma_Start();
-  Serial.println("Connecting to i2C devices");
+
+  Logger::verbose("Connecting to i2C devices");
   sgp40_Start();
   shtc3_Start();
-  
-  Serial.println("Setup() done!");
-  digitalWrite(ledPin, LOW);
+
+  Logger::notice("Setup() done!");
+  digitalWrite(BUILTIN_LED, LOW);
+  Logger::notice("---------------------------------------------");
 }
 
 void loop()
 {
-  long now = millis();
+  long now = millis();        // Grab timestamp on every entry
+  static long lastMsg = 0;    // Timestamp of last loop() pass
 
-  if (!client.connected())
-  {
-    reconnect();
-  }
-  client.loop();
+  ArduinoOTA.handle();
+
+//  if (!mqttClient.connected())
+//    reconnect();
+
+//  if (mqttClient.connected())
+//    mqttClient.loop();
+
   // Publish data every INTERVAL seconds
   if (now - lastMsg > INTERVAL*1000)
   {
     // Turn on LED to indicate we're taking a reading
-    digitalWrite(ledPin, HIGH);
+    digitalWrite(BUILTIN_LED, HIGH);
+    // Bring up MQTT broker connection
+    connectMqtt();
     // Save the timestamp
     lastMsg = now;
     // Receive the particle data
     hpma_Read();
     // Read temp, humidity and TVOC/CO2
     sgp40_Read();
+    // Drop MQTT connection
+    disconnectMqtt();
     // Done...turn off the LED
-    digitalWrite(ledPin, LOW);
+    digitalWrite(BUILTIN_LED, LOW);
+    Logger::notice("---------------------------------------------");
   }
 }
 
+
+//////////////////////////////////////////////////
+///                                            ///
+///               Logging                      ///
+///                                            ///
+//////////////////////////////////////////////////
+
+void localLogger(Logger::Level level, const char* module, const char* message)
+{
+  Serial.print(F("AQW Logger: ["));
+  Serial.print(Logger::asString(level));
+  Serial.print(F("] "));
+
+  if (strlen(module) > 0)
+  {
+      Serial.print(F(": "));
+      Serial.print(module);
+      Serial.print(" ");
+  }
+
+  Serial.println(message);
+
+  if (TelnetStream.available())
+  {
+    TelnetStream.print(Logger::asString(level));
+    TelnetStream.print(" : ");
+    TelnetStream.println(message);
+  }
+}
 
 //////////////////////////////////////////////////
 ///                                            ///
@@ -214,34 +284,76 @@ void setup_wifi()
 {
   delay(10);
   WiFi.begin(ssid, password);
-  Serial.write("Wifi connecting.\n");
+  Logger::warning("Wifi connecting.");
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
-    Serial.write(".\n");
+    Logger::warning(".");
+    // No need to call ArduinoOTA.handle() since we're not connected to wifi
   }
-  Serial.write("Wifi connected.\n");
+  Logger::notice("Wifi connected.");
 }
 
-void reconnect()
+void connectMqtt()
 {
+  if (mqttClient.connected())
+  {
+    Logger::warning("MQTT already connected: Reestablishing");
+    disconnectMqtt();
+  }
+
   // Loop until we're reconnected
-  Serial.write("MQTT connecting.\n");
-  while (!client.connected())
+  Logger::verbose("MQTT connecting.");
+  while (!mqttClient.connected())
   {
     // Attempt to connect
-    if (client.connect("ESP32-AQW-Client"))
+    if (mqttClient.connect("ESP32-AQW-Client"))
     {
-      digitalWrite(ledPin, HIGH);
-      Serial.write("MQTT connected.\n");
+      digitalWrite(BUILTIN_LED, HIGH);
+      Logger::verbose("MQTT connected.");
     }
     else
     {
       // Wait 5 seconds before retrying
       delay(5000);
-      digitalWrite(ledPin, LOW);
-      Serial.write("MQTT cannot connect.\n");
+      digitalWrite(BUILTIN_LED, LOW);
+      Logger::error("MQTT cannot connect.");
     }
+    ArduinoOTA.handle();
+  }
+}
+
+void disconnectMqtt()
+{
+    mqttClient.disconnect();
+}
+
+void reconnect()
+{
+  if (mqttClient.connected())
+  {
+    Logger::warning("Reestablishing MQTT connection");
+    mqttClient.disconnect();
+  }
+
+  // Loop until we're reconnected
+  Logger::notice("MQTT connecting.");
+  while (!mqttClient.connected())
+  {
+    // Attempt to connect
+    if (mqttClient.connect("ESP32-AQW-Client"))
+    {
+      digitalWrite(BUILTIN_LED, HIGH);
+      Logger::notice("MQTT connected.");
+    }
+    else
+    {
+      // Wait 5 seconds before retrying
+      delay(5000);
+      digitalWrite(BUILTIN_LED, LOW);
+      Logger::error("MQTT cannot connect.");
+    }
+    ArduinoOTA.handle();
   }
 }
 
@@ -254,22 +366,23 @@ void reconnect()
 
 void shtc3_Start(void)
 {
-  Serial.println("SHTC3 test");
+  Logger::verbose("SHTC3 test");
   if (! shtc3.begin())
   {
-    Serial.println("Couldn't find SHTC3");
+    Logger::error("Couldn't find SHTC3");
     int cnt=0;
     while (1) 
     {
       delay(10);
       cnt++; 
-      if (cnt > 1000)
-        digitalWrite(ledPin, HIGH);
+      if (cnt > 10000)
+        digitalWrite(BUILTIN_LED, HIGH);
       else
-        digitalWrite(ledPin, LOW);
+        digitalWrite(BUILTIN_LED, LOW);
+      ArduinoOTA.handle();
     }
   }
-  Serial.println("Found SHTC3 sensor");
+  Logger::notice("Found SHTC3 sensor");
 }
 
 
@@ -281,27 +394,27 @@ void shtc3_Start(void)
 
 void sgp40_Start(void)
 {
-  Serial.println("SGP40 test with SHT31 compensation");
+  Logger::verbose("SGP40 test with SHTC3 compensation");
 
   if (! sgp.begin())
   {
     int cnt=0;
-    Serial.println("SGP40 sensor not found :(");
-    while (1) 
+    Logger::error("SGP40 sensor not found :(");
+    while (1)
     {
       delay(10);
       cnt++; 
-      if (cnt > 10000)
-        digitalWrite(ledPin, HIGH);
+      if (cnt > 100000)
+        digitalWrite(BUILTIN_LED, HIGH);
       else
-        digitalWrite(ledPin, LOW);
+        digitalWrite(BUILTIN_LED, LOW);
+      ArduinoOTA.handle();
     }
   }
 
-  Serial.print("Found SGP40 serial #");
-  Serial.print(sgp.serialnumber[0], HEX);
-  Serial.print(sgp.serialnumber[1], HEX);
-  Serial.println(sgp.serialnumber[2], HEX);
+  snprintf(logMsg, LOGMSG_LEN, "Found SGP40 serial # %02x%02x%02x",
+    sgp.serialnumber[0], sgp.serialnumber[1], sgp.serialnumber[2]);
+  Logger::notice(logMsg);
 }
 
 void sgp40_Read(void)
@@ -309,27 +422,34 @@ void sgp40_Read(void)
   uint16_t sraw;
   int32_t voc_index;
   sensors_event_t humidity, temp;
-  
+  bool err;
+
   shtc3.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
   
-  Serial.print("Temperature: "); Serial.print(temp.temperature); Serial.println(" degrees C");
-  Serial.print("Humidity: "); Serial.print(humidity.relative_humidity); Serial.println("% rH");
+  snprintf(logMsg, LOGMSG_LEN, "Temperature:     %.2f degrees C", temp.temperature);
+  Logger::notice(logMsg);
+  snprintf(logMsg, LOGMSG_LEN, "Humidity:        %.2f%% rH", humidity.relative_humidity);
+  Logger::notice(logMsg);
 
   sraw = sgp.measureRaw(temp.temperature, humidity.relative_humidity);
-  Serial.print("Raw measurement: ");
-  Serial.println(sraw);
+  snprintf(logMsg, LOGMSG_LEN, "Raw measurement: %D", sraw);
+  Logger::notice(logMsg);
 
   voc_index = sgp.measureVocIndex(temp.temperature, humidity.relative_humidity);
-  Serial.print("Voc Index: ");
-  Serial.println(voc_index);
+  snprintf(logMsg, LOGMSG_LEN, "VOC Index:       %d", voc_index);
+  Logger::notice(logMsg);
 
-  snprintf (mqtt_pub, 16, "%f", temp.temperature);
-  client.publish("AQW/temperature", mqtt_pub);
-  snprintf (mqtt_pub, 16, "%f", humidity.relative_humidity);
-  client.publish("AQW/humidity", mqtt_pub);
+  snprintf (mqtt_pub, 16, "%.2f", temp.temperature);
+  err = mqttClient.publish("AQW/temperature", mqtt_pub);
+  snprintf (mqtt_pub, 16, "%.2f", humidity.relative_humidity);
+  err &= mqttClient.publish("AQW/humidity", mqtt_pub);
   snprintf (mqtt_pub, 16, "%D", voc_index);
-  client.publish("AQW/voc_index", mqtt_pub);
+  err &= mqttClient.publish("AQW/voc_index", mqtt_pub);
 
+  if (err == false)
+    Logger::error("Error while publiching MQTT data");
+  else
+    Logger::verbose("Published SHTC3 & SGP40 data via MQTT");
 }
 
 //////////////////////////////////////////////////
@@ -341,10 +461,10 @@ void sgp40_Read(void)
 void hpma_Start(void)
 {
   HPMA115S0.begin(9600, SERIAL_8N1, RXD2, TXD2);
-  while (!HPMA115S0);
-  Serial.println("Pausing 6s for particle sensor...");
+  while (!HPMA115S0) ArduinoOTA.handle();
+  Logger::notice("Pausing 6s for particle sensor...");
   delay(6000);
-  Serial.println("Starting HPM autosend");
+  Logger::verbose("Starting HPM autosend");
   start_autosend();
 }
 
@@ -352,25 +472,35 @@ void hpma_Read(void)
 {
   int pm25;
   int pm10;
+  bool err;
 
   if (!receive_measurement(&pm25, &pm10))
   {
-    digitalWrite(ledPin, 0);
-    Serial.println("Cannot receive data from HPMA115S0!");
+    digitalWrite(BUILTIN_LED, 0);
+    Logger::warning("Cannot receive data from HPMA115S0!");
     return;
   }
+
+  snprintf(logMsg, LOGMSG_LEN, "PM 2.5:          %d ug/m3", pm25);
+  Logger::notice(logMsg);
+  snprintf(logMsg, LOGMSG_LEN, "PM 10:           %d ug/m3", pm10);
+  Logger::notice(logMsg);
+
   snprintf (mqtt_pub, 16, "%D", pm25);
-  client.publish("AQW/PM2.5", mqtt_pub);
+  err = mqttClient.publish("AQW/PM2.5", mqtt_pub);
   snprintf (mqtt_pub, 16, "%D", pm10);
-  client.publish("AQW/PM10", mqtt_pub);
-  Serial.println("PM 2.5:\t" + String(pm25) + " ug/m3");
-  Serial.println("PM 10:\t" + String(pm10) + " ug/m3");
-  Serial.println("MQTT published HPMA115S0 data");
+  err &= mqttClient.publish("AQW/PM10", mqtt_pub);
+
+  if (err == false)
+    Logger::error("Error while publishing MQTT data");
+  else
+    Logger::verbose("Published HPMA115S0 data via MQTT");
+
 }
 
 bool receive_measurement (int *pm25, int *pm10)
 {
-  while(HPMA115S0.available() < 32);
+  while(HPMA115S0.available() < 32) ArduinoOTA.handle();
   byte HEAD0 = HPMA115S0.read();
   byte HEAD1 = HPMA115S0.read();
   while (HEAD0 != 0x42)
@@ -385,6 +515,7 @@ bool receive_measurement (int *pm25, int *pm10)
       HEAD0 = HPMA115S0.read();
       HEAD1 = HPMA115S0.read();
     }
+    ArduinoOTA.handle();
   }
   if (HEAD0 == 0x42 && HEAD1 == 0x4D)
   {
@@ -420,7 +551,7 @@ bool receive_measurement (int *pm25, int *pm10)
     byte CheckSumL = HPMA115S0.read();
     if (((HEAD0 + HEAD1 + LENH + LENL + Data0H + Data0L + Data1H + Data1L + Data2H + Data2L + Data3H + Data3L + Data4H + Data4L + Data5H + Data5L + Data6H + Data6L + Data7H + Data7L + Data8H + Data8L + Data9H + Data9L + Data10H + Data10L + Data11H + Data11L + Data12H + Data12L) % 256) != CheckSumL)
     {
-      Serial.println("Checksum fail");
+      Logger::error("HPMA115S0 Checksum fail");
       return 0;
     }
     *pm25 = (Data1H * 256) + Data1L;
@@ -438,7 +569,7 @@ bool start_autosend(void)
   delay(500);
 
   // Then we wait for the response
-  while(HPMA115S0.available() < 2);
+  while(HPMA115S0.available() < 2) ArduinoOTA.handle();
   byte read1 = HPMA115S0.read();
   byte read2 = HPMA115S0.read();
 
