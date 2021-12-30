@@ -79,7 +79,7 @@ This code relies on the following libraries:
  - Look at power usage and minimize wherever possible
  - Use "EEPROM" for config storage
  - Create serial console for configuration
- - Enable OTA upgrades
+~~ - Enable OTA upgrades~~
  - Add support for SSD display
  - If operating on battery, turn on wifi only when needed
    ...and turn off fan in HPM until reading taken
