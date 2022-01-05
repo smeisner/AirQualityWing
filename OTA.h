@@ -37,7 +37,8 @@ void setupOTA(const char* nameprefix, const char* ssid, const char* password) {
 
   // Wait for connection
   while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
+    Serial.println("NOTICE : In module OTA.h, function setupOTA()");
+    Serial.println("FAILURE : Connection Failed! Rebooting (Check wifi credentials)...");
     delay(5000);
     ESP.restart();
   }

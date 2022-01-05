@@ -133,7 +133,7 @@ const char ssid[] = SECRET_SSID;
 const char password[] = SECRET_PASS;
 const char* mqtt_server = SECRET_MQTT_BROKER;
 
-#define BANNER "HUZZAH32 Feather/Air Quality Wing -- V1.5"
+#define BANNER "HUZZAH32 Feather/Air Quality Wing -- V1.6"
 
 // Global device structs
 WiFiClient aqwClient;
@@ -148,7 +148,7 @@ char logMsg[LOGMSG_LEN];      // General use buffer for log messages
 char mqtt_pub[50];            // Buffer for MQTT msg published
 
 //
-// Air Quality Wing related details
+// Air Quality Wing hardware related details
 //
 // Set up sensor enable PIN
 #define SENS_EN_PIN A8        // Enable pin for builtin AQW power supply (which provides 5V)
@@ -156,6 +156,31 @@ char mqtt_pub[50];            // Buffer for MQTT msg published
 #define RXD2 16               // Pin assigments for onboard UART
 #define TXD2 17
 #define HPMA1150_EN_PIN A9    // Enable pin for HPM sensor
+
+//
+// Historical Data tracking used to validqate reading received.
+// This will filter out erroneous readings.
+//
+typedef enum {
+  PM25,
+  PM10,
+  TEMPERATURE,
+  HUMIDITY,
+  VOC_INDEX
+} DataType;
+
+// Keeping the last 2 readigns to average
+typedef struct {
+  unsigned long pm25[2];
+  unsigned long pm10[2];
+  float temperature[2];
+  float humidity[2];
+  unsigned long voc_index[2];
+} HISTORICAL_DATA;
+
+HISTORICAL_DATA HistoricalData;
+int ValidationFactor = 20;
+
 
 
 //////////////////////////////////////////////////
@@ -205,6 +230,8 @@ void setup()
   sgp40_Start();
   shtc3_Start();
 
+  memset (&HistoricalData, sizeof(HISTORICAL_DATA), 0);
+  
   Logger::notice("Setup() done!");
   digitalWrite(BUILTIN_LED, LOW);
   Logger::notice("---------------------------------------------");
@@ -216,12 +243,6 @@ void loop()
   static long lastMsg = 0;    // Timestamp of last loop() pass
 
   ArduinoOTA.handle();
-
-//  if (!mqttClient.connected())
-//    reconnect();
-
-//  if (mqttClient.connected())
-//    mqttClient.loop();
 
   // Publish data every INTERVAL seconds
   if (now - lastMsg > INTERVAL*1000)
@@ -360,6 +381,87 @@ void reconnect()
 
 //////////////////////////////////////////////////
 ///                                            ///
+///             Data Validation                ///
+///                                            ///
+//////////////////////////////////////////////////
+
+bool validateReading(void *data, DataType type)
+{
+  switch (type)
+  {
+    case PM25:
+      HistoricalData.pm25[0] = HistoricalData.pm25[1];
+      HistoricalData.pm25[1] = *(unsigned long *)data;
+      if (HistoricalData.pm25[0] == 0)
+        return true;
+      if (*(unsigned long *)data > (((HistoricalData.pm25[0] + HistoricalData.pm25[1]) / 2) * ValidationFactor))
+      {
+        Logger::error("PM2.5 value read out of bounds");
+        return false;
+      }
+      else
+        return true;
+      break;
+    case PM10:
+      HistoricalData.pm10[0] = HistoricalData.pm10[1];
+      HistoricalData.pm10[1] = *(unsigned long *)data;
+      if (HistoricalData.pm10[0] == 0)
+        return true;
+      if (*(unsigned long *)data > (((HistoricalData.pm10[0] + HistoricalData.pm10[1]) / 2) * ValidationFactor))
+      {
+        Logger::error("PM10 value read out of bounds");
+        return false;
+      }
+      else
+        return true;
+      break;
+    case TEMPERATURE:
+      HistoricalData.temperature[0] = HistoricalData.temperature[1];
+      HistoricalData.temperature[1] = *(float *)data;
+      if (HistoricalData.temperature[0] == 0)
+        return true;
+      if (*(float *)data > (((HistoricalData.temperature[0] + HistoricalData.temperature[1]) / 2.0) * (float)ValidationFactor))
+      {
+        Logger::error("Temperature value read out of bounds");
+        return false;
+      }
+      else
+        return true;
+      break;
+    case HUMIDITY:
+      HistoricalData.humidity[0] = HistoricalData.humidity[1];
+      HistoricalData.humidity[1] = *(float *)data;
+      if (HistoricalData.humidity[0] == 0)
+        return true;
+      if (*(float *)data > (((HistoricalData.humidity[0] + HistoricalData.humidity[1]) / 2.0) * (float)ValidationFactor))
+      {
+        Logger::error("Humidity value read out of bounds");
+        return false;
+      }
+      else
+        return true;
+      break;
+    case VOC_INDEX:
+      HistoricalData.voc_index[0] = HistoricalData.voc_index[1];
+      HistoricalData.voc_index[1] = *(unsigned long *)data;
+      if (HistoricalData.voc_index[0] == 0)
+        return true;
+      if (*(unsigned long *)data > (((HistoricalData.voc_index[0] + HistoricalData.voc_index[1]) / 2) * ValidationFactor))
+      {
+        Logger::error("VOC Index value read out of bounds");
+        return false;
+      }
+      else
+        return true;
+      break;
+    default:
+      Logger::error("Data Valididater: Invalid type specified");
+      return false;
+  }
+}
+
+//////////////////////////////////////////////////
+///                                            ///
 ///               SHTC3 Sensor                 ///
 ///                                            ///
 //////////////////////////////////////////////////
@@ -439,12 +541,21 @@ void sgp40_Read(void)
   snprintf(logMsg, LOGMSG_LEN, "VOC Index:       %d", voc_index);
   Logger::notice(logMsg);
 
-  snprintf (mqtt_pub, 16, "%.2f", temp.temperature);
-  err = mqttClient.publish("AQW/temperature", mqtt_pub);
-  snprintf (mqtt_pub, 16, "%.2f", humidity.relative_humidity);
-  err &= mqttClient.publish("AQW/humidity", mqtt_pub);
-  snprintf (mqtt_pub, 16, "%D", voc_index);
-  err &= mqttClient.publish("AQW/voc_index", mqtt_pub);
+  if (validateReading(&temp.temperature, TEMPERATURE))
+  {
+    snprintf (mqtt_pub, 16, "%.2f", temp.temperature);
+    err = mqttClient.publish("AQW/temperature", mqtt_pub);
+  }
+  if (validateReading(&humidity.relative_humidity, HUMIDITY))
+  {
+    snprintf (mqtt_pub, 16, "%.2f", humidity.relative_humidity);
+    err &= mqttClient.publish("AQW/humidity", mqtt_pub);
+  }
+  if (validateReading(&voc_index, VOC_INDEX))
+  {
+    snprintf (mqtt_pub, 16, "%D", voc_index);
+    err &= mqttClient.publish("AQW/voc_index", mqtt_pub);
+  }
 
   if (err == false)
     Logger::error("Error while publiching MQTT data");
@@ -486,10 +597,16 @@ void hpma_Read(void)
   snprintf(logMsg, LOGMSG_LEN, "PM 10:           %d ug/m3", pm10);
   Logger::notice(logMsg);
 
-  snprintf (mqtt_pub, 16, "%D", pm25);
-  err = mqttClient.publish("AQW/PM2.5", mqtt_pub);
-  snprintf (mqtt_pub, 16, "%D", pm10);
-  err &= mqttClient.publish("AQW/PM10", mqtt_pub);
+  if (validateReading(&pm25, PM25))
+  {
+    snprintf (mqtt_pub, 16, "%D", pm25);
+    err = mqttClient.publish("AQW/PM2.5", mqtt_pub);
+  }
+  if (validateReading(&pm10, PM10))
+  {
+    snprintf (mqtt_pub, 16, "%D", pm10);
+    err &= mqttClient.publish("AQW/PM10", mqtt_pub);
+  }
 
   if (err == false)
     Logger::error("Error while publishing MQTT data");
