@@ -67,6 +67,16 @@ This code relies on the following libraries:
    - Manually download zip from repo and add to Arduino IDE\
      https://github.com/felixgalindo/HPMA115S0.git\ \
      [Possible alternative: https://github.com/jedp/PMSensor-HPMA115]
+* To support OTA updates;
+   * ArduinoOTA
+     - Installed by name via the IDE Library Manager\
+       https://github.com/jandrassy/ArduinoOTA
+   * TelnetStream
+     - Installed by name via IDE Library Manager\
+       https://github.com/jandrassy/TelnetStream
+   * Logger
+     - Installed by name via IDE Library Manager\
+       https://github.com/bakercp/Logger
 
 ## I2C Addresses:
 | Device | I2C Address |
@@ -79,7 +89,6 @@ This code relies on the following libraries:
  - Look at power usage and minimize wherever possible
  - Use "EEPROM" for config storage
  - Create serial console for configuration
- - Enable OTA upgrades
  - Add support for SSD display
  - If operating on battery, turn on wifi only when needed
    ...and turn off fan in HPM until reading taken
