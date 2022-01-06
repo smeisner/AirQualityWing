@@ -133,7 +133,7 @@ const char ssid[] = SECRET_SSID;
 const char password[] = SECRET_PASS;
 const char* mqtt_server = SECRET_MQTT_BROKER;
 
-#define BANNER "HUZZAH32 Feather/Air Quality Wing -- V1.6"
+#define BANNER "HUZZAH32 Feather/Air Quality Wing -- V1.7"
 
 // Global device structs
 WiFiClient aqwClient;
@@ -169,7 +169,7 @@ typedef enum {
   VOC_INDEX
 } DataType;
 
-// Keeping the last 2 readigns to average
+// Keeping the last 2 readings to average
 typedef struct {
   unsigned long pm25[2];
   unsigned long pm10[2];
@@ -181,6 +181,14 @@ typedef struct {
 HISTORICAL_DATA HistoricalData;
 int ValidationFactor = 20;
 
+//
+// Support for event log buffer recall
+//
+#define RECALL_BUFFER_LEN 1023
+const int RecallBufferLen = RECALL_BUFFER_LEN;
+int RecallPosition = 0;
+// Allocate 1 extra byte to allow for NULL terminator
+char RecallBuffer[RECALL_BUFFER_LEN+1];
 
 
 //////////////////////////////////////////////////
@@ -198,11 +206,17 @@ void setup()
   Serial.begin(115200);
   while (!Serial) delay(100);
 
+  // Toggle LED to show a pattern in case the OTA/wifi setup doesn't work
+  digitalWrite(BUILTIN_LED, LOW);
   setupOTA("AirQualityWing", ssid, password);
+  digitalWrite(BUILTIN_LED, HIGH);
   TelnetStream.begin();
 
-  Logger::setLogLevel(Logger::NOTICE);
+  // Enable all logging during startup
+  Logger::setLogLevel(Logger::VERBOSE);
   Logger::setOutputFunction(localLogger);
+
+  // Delay to allow connection via Telnet to get started
   delay(5000);
 
   Logger::notice(BANNER);
@@ -230,7 +244,7 @@ void setup()
   sgp40_Start();
   shtc3_Start();
 
-    // Clear all historical data before any readings are taken
+  // Clear all historical data before any readings are taken
   memset (&HistoricalData, sizeof(HISTORICAL_DATA), 0);
   // Do an initial reading to populate the validation database.
   //connectMqtt();
@@ -240,7 +254,18 @@ void setup()
 
   Logger::notice("Setup() done!");
   digitalWrite(BUILTIN_LED, LOW);
+
+
+// Test code
+//  test(Logger::FATAL, "Module", "This is a test twelve = %d --> \\n\n", 12);
+//  test(Logger::WARNING, "TestModule", "Warning...no args...new line\n");
+//  test(Logger::VERBOSE, "", "No module... verbose. Value of BUILTIN_LED = %d <no eol>", BUILTIN_LED);
+//  test(Logger::NOTICE, "WIFI", "wifi ssid = %s psk = %s<eol>\n", ssid, password);
+
+
+  Logger::notice("Setting loglevel to WARNING");
   Logger::notice("---------------------------------------------");
+  Logger::setLogLevel(Logger::WARNING);
 }
 
 void loop()
@@ -249,6 +274,8 @@ void loop()
   static long lastMsg = 0;    // Timestamp of last loop() pass
 
   ArduinoOTA.handle();
+
+  CheckTelnet();
 
   // Publish data every INTERVAL seconds
   if (now - lastMsg > INTERVAL*1000)
@@ -278,6 +305,35 @@ void loop()
 ///                                            ///
 //////////////////////////////////////////////////
 
+/*
+ * Move on to the next log level and return the string to indicate new level.
+ * Note of the available log levels, Silent is skipped.
+ * 
+ * From logging header file:
+ *    VERBOSE = 0,
+ *    NOTICE,
+ *    WARNING,
+ *    ERROR,
+ *    FATAL,
+ *    SILENT
+ *    
+ *  If no valid log level is set, we default to Notice level.
+ * 
+ */
+char *cycleLogLevel()
+{
+  Logger::Level logLevel = Logger::getLogLevel();
+  switch (logLevel)
+  {
+    case Logger::VERBOSE: Logger::setLogLevel(Logger::NOTICE); return "Notice"; break;
+    case Logger::NOTICE: Logger::setLogLevel(Logger::WARNING); return "Warning"; break;
+    case Logger::WARNING: Logger::setLogLevel(Logger::ERROR); return "Error"; break;
+    case Logger::ERROR: Logger::setLogLevel(Logger::FATAL); return "Fatal"; break;
+    case Logger::FATAL: Logger::setLogLevel(Logger::VERBOSE); return "Verbose"; break;
+    default: Logger::setLogLevel(Logger::NOTICE); return "Notice"; break;
+  }
+}
+
 // Test code
 /*
  * try to implement a printf-like debug logging
@@ -306,11 +362,58 @@ void localLogger(Logger::Level level, const char* module, const char* message)
 
   Serial.println(message);
 
-  if (TelnetStream.available())
-  {
+// Unreliable. Need a better way to detect if someone is telnet'd in
+//@@@  if (TelnetStream.available())
+//  {
     TelnetStream.print(Logger::asString(level));
     TelnetStream.print(" : ");
     TelnetStream.println(message);
+//  }
+
+  if (strlen(message) > RecallBufferLen)
+  {
+    Serial.println("*** RECALL BUFFER TOO SMALL **");
+    TelnetStream.println("*** RECALL BUFFER TOO SMALL **");
+  }
+  // +2 for '\r' and '\n'
+  else if (strlen(message) + RecallPosition + 2 < RecallBufferLen)
+  {
+    // No wrapping
+    strcpy (&RecallBuffer[RecallPosition], message);
+    RecallPosition += strlen(message) + 2;
+  }
+  else
+  {
+    // Buffer wrapped
+    strncpy (&RecallBuffer[RecallPosition], message, (RecallBufferLen - RecallPosition));
+    // We allocated 1 extra byte, so this is OK it's not zero-based
+    RecallBuffer[RecallBufferLen] = '\0';
+    // The next line copies the remaining characters from the new message buffer
+    strncpy (RecallBuffer, &message[(RecallBufferLen - RecallPosition)], strlen(message) - (RecallBufferLen - RecallPosition));
+    RecallPosition = strlen(message) - (RecallBufferLen - RecallPosition) + 2;
+  }
+  // Add necessary extra characters to make it print pretty
+  RecallBuffer[RecallPosition - 2] = '\r';
+  RecallBuffer[RecallPosition - 1] = '\n';
+  RecallBuffer[RecallPosition] = '\0';
+}
+
+void RecallBufferDump()
+{
+  if (RecallPosition == 0)
+  {
+    TelnetStream.println ("Recall Buffer Empty!");
+  }
+  else
+  {
+    TelnetStream.println("==================================================");
+    TelnetStream.println("===     Begin Event Log Buffer Dump            ===");
+    TelnetStream.println("==================================================");
+    TelnetStream.print(&RecallBuffer[RecallPosition+2]);
+    TelnetStream.print(RecallBuffer);
+    TelnetStream.println("==================================================");
+    TelnetStream.println("===     End of Event Log Buffer Dump           ===");
+    TelnetStream.println("==================================================");
   }
 }
 
@@ -319,6 +422,46 @@ void localLogger(Logger::Level level, const char* module, const char* message)
 ///               Wifi & MQTT                  ///
 ///                                            ///
 //////////////////////////////////////////////////
+
+void CheckTelnet()
+{
+  char ch = TelnetStream.read();
+  switch (ch)
+  {
+    char *newLog;
+    case 'R':
+    case 'r':
+      TelnetStream.println("Restarting ESP32...");
+      TelnetStream.stop();
+      delay(100);
+      ESP.restart();
+      break;
+    case 'L':
+    case 'l':
+      TelnetStream.print("Changing log level to: ");
+      Serial.print("Changing log level to: ");
+      newLog = cycleLogLevel();
+      TelnetStream.println(newLog);
+      Serial.println(newLog);
+      break;
+    case 'D':
+    case 'd':
+      TelnetStream.println("Dump log history: ");
+      RecallBufferDump();
+      break;
+    case 'H':
+    case 'h':
+    case '?':
+      TelnetStream.println("Commands:");
+      TelnetStream.println("    R - Reboot");
+      TelnetStream.println("    L - Cycle log level");
+      TelnetStream.println("    D - Dump most recent log");
+      break;
+  }
+  if (ch != NULL)
+    TelnetStream.begin();
+}
+
 
 void setup_wifi()
 {
@@ -541,10 +684,10 @@ void shtc3_Start(void)
   {
     Logger::error("Couldn't find SHTC3");
     int cnt=0;
-    while (1) 
+    while (1)
     {
       delay(10);
-      cnt++; 
+      cnt++;
       if (cnt > 10000)
         digitalWrite(BUILTIN_LED, HIGH);
       else
@@ -608,7 +751,6 @@ void sgp40_Read(bool FirstRun)
   voc_index = sgp.measureVocIndex(temp.temperature, humidity.relative_humidity);
   snprintf(logMsg, LOGMSG_LEN, "VOC Index:       %d", voc_index);
   Logger::notice(logMsg);
-
 
   if (FirstRun)
   {
@@ -676,7 +818,6 @@ void hpma_Read(bool FirstRun)
   Logger::notice(logMsg);
   snprintf(logMsg, LOGMSG_LEN, "PM 10:           %d ug/m3", pm10);
   Logger::notice(logMsg);
-
 
   if (FirstRun)
   {
