@@ -88,7 +88,7 @@ This code relies on the following libraries:
 ## To do:
  - Look at power usage and minimize wherever possible
  - Use "EEPROM" for config storage
- - Create serial console for configuration
  - Add support for SSD display
- - If operating on battery, turn on wifi only when needed
-   ...and turn off fan in HPM until reading taken
+ - If operating on battery, turn on wifi only when needed\
+   ...and turn off fan in HPM until reading taken\
+   ...but this will effectively disable the telnet console & OTA updates
