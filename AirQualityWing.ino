@@ -29,7 +29,7 @@
  * Description
  * 
  * The HUZZAH32 board is one of the few that has the Fetaher foot print and
- * supplies onboard wifi. The wifi allows for MQTT publiching to a broker.
+ * supplies onboard wifi. The wifi allows for MQTT publishing to a broker.
  * 
  * Info on the HUZZAH32 can be found anywhere on the internet, but Adafruit has some good details.
  * https://learn.adafruit.com/adafruit-huzzah32-esp32-feather
@@ -173,8 +173,8 @@ typedef enum {
 typedef struct {
   unsigned long pm25[2];
   unsigned long pm10[2];
-  float temperature[2];
-  float humidity[2];
+  unsigned long temperature[2]; // Converted to int to simplify code
+  unsigned long humidity[2];    //      "         "       "
   unsigned long voc_index[2];
 } HISTORICAL_DATA;
 
@@ -230,8 +230,14 @@ void setup()
   sgp40_Start();
   shtc3_Start();
 
+    // Clear all historical data before any readings are taken
   memset (&HistoricalData, sizeof(HISTORICAL_DATA), 0);
-  
+  // Do an initial reading to populate the validation database.
+  //connectMqtt();
+  hpma_Read(true);
+  sgp40_Read(true);
+  disconnectMqtt();
+
   Logger::notice("Setup() done!");
   digitalWrite(BUILTIN_LED, LOW);
   Logger::notice("---------------------------------------------");
@@ -254,9 +260,9 @@ void loop()
     // Save the timestamp
     lastMsg = now;
     // Receive the particle data
-    hpma_Read();
+    hpma_Read(false);
     // Read temp, humidity and TVOC/CO2
-    sgp40_Read();
+    sgp40_Read(false);
     // Drop MQTT connection
     disconnectMqtt();
     // Done...turn off the LED
@@ -271,6 +277,19 @@ void loop()
 ///               Logging                      ///
 ///                                            ///
 //////////////////////////////////////////////////
+
+// Test code
+/*
+ * try to implement a printf-like debug logging
+ */
+void test(Logger::Level level, const char* module, char *format, ...)
+{
+  va_list va;
+  va_start(va, format);
+  vsnprintf(logMsg, LOGMSG_LEN, format, va);
+  localLogger(level, module, logMsg);
+  va_end(va);
+}
 
 void localLogger(Logger::Level level, const char* module, const char* message)
 {
@@ -385,79 +404,128 @@ void reconnect()
 ///                                            ///
 //////////////////////////////////////////////////
 
-bool validateReading(void *data, DataType type)
+/* 
+ *  This function takes a pointer to a value and a type. Basedon the type,
+ *  the value will get cast and used. The last two readings are kept and
+ *  the avergae is used to determine if the next reading is legit. A factor
+ *  is used to allow for sudden, realistic spikes.
+ *  
+ *  All console logging is done in this routing. Either true or false is
+ *  returned to the caller.
+ */
+
+#define PM25_MAX 900
+#define PM10_MAX 1000
+#define VOC_MAX 2000
+#define TEMPERATURE_MAX 150
+#define HUMIDITY_MAX 125
+
+bool validateReading(void *data_r, DataType type)
 {
+  unsigned long max, data, avg;
+  char *str;
+
+  //
+  // Check type param is valid
+  //
+  if (type != PM25 && type != PM10 && type != VOC_INDEX &&
+      type != TEMPERATURE && type != HUMIDITY)
+  {
+    Logger::error("Data Valididater: Invalid type specified");
+    return false;
+  }
+
+  //
+  // Based on the type, collect the right data
+  //
+  switch (type)
+  {
+    case PM25:
+      max = PM25_MAX;
+      str = "PM2.5";
+      data = *(unsigned long *)data_r;
+      avg = (HistoricalData.pm25[1] + HistoricalData.pm25[0]) / 2;
+      break;
+    case PM10:
+      max = PM10_MAX;
+      str = "PM10";
+      data = *(unsigned long *)data_r;
+      avg = (HistoricalData.pm10[1] + HistoricalData.pm10[0]) / 2;
+      break;
+    case VOC_INDEX:
+      max = VOC_MAX;
+      str = "VOC Index";
+      data = *(unsigned long *)data_r;
+      avg = (HistoricalData.voc_index[1] + HistoricalData.voc_index[0]) / 2;
+      break;
+    case TEMPERATURE:
+      max = TEMPERATURE_MAX;
+      str = "Temperature";
+      data = (unsigned long)(*(float *)data_r);
+      avg = (HistoricalData.temperature[1] + HistoricalData.temperature[0]) / 2;
+      break;
+    case HUMIDITY:
+      max = HUMIDITY_MAX;
+      str = "Humidity";
+      data = (unsigned long)(*(float *)data_r);
+      avg = (HistoricalData.humidity[1] + HistoricalData.humidity[0]) / 2;
+      break;
+  }
+
+  //
+  // Basic sanity test to see if the value is just plain nuts!
+  //
+  if (data > max)
+  {
+    test(Logger::ERROR, "", "Initial %s value read is beyond max", str);
+    return false;
+  }
+
+  //
+  // Be sure the avg value is greater than 0
+  //
+  if (avg == 0) avg = 1;
+
+  //
+  // Using value calculated above, test for legit value. Notice the
+  // test is only for invalid rising readings. Invalid decreases are
+  // not caught.
+  //
+  if (data > (avg * ValidationFactor))
+  {
+    test(Logger::ERROR, "", "%s data value read out of bounds", str);
+    return false;
+  }
+
+  //
+  // Rotate old data and insert new. Only add the new value if it
+  // appears to be within a normal range (passes above tests).
+  //
   switch (type)
   {
     case PM25:
       HistoricalData.pm25[0] = HistoricalData.pm25[1];
-      HistoricalData.pm25[1] = *(unsigned long *)data;
-      if (HistoricalData.pm25[0] == 0)
-        return true;
-      if (*(unsigned long *)data > (((HistoricalData.pm25[0] + HistoricalData.pm25[1]) / 2) * ValidationFactor))
-      {
-        Logger::error("PM2.5 value read out of bounds");
-        return false;
-      }
-      else
-        return true;
+      HistoricalData.pm25[1] = data;
       break;
     case PM10:
       HistoricalData.pm10[0] = HistoricalData.pm10[1];
-      HistoricalData.pm10[1] = *(unsigned long *)data;
-      if (HistoricalData.pm10[0] == 0)
-        return true;
-      if (*(unsigned long *)data > (((HistoricalData.pm10[0] + HistoricalData.pm10[1]) / 2) * ValidationFactor))
-      {
-        Logger::error("PM10 value read out of bounds");
-        return false;
-      }
-      else
-        return true;
-      break;
-    case TEMPERATURE:
-      HistoricalData.temperature[0] = HistoricalData.temperature[1];
-      HistoricalData.temperature[1] = *(float *)data;
-      if (HistoricalData.temperature[0] == 0)
-        return true;
-      if (*(float *)data > (((HistoricalData.temperature[0] + HistoricalData.temperature[1]) / 2.0) * (float)ValidationFactor))
-      {
-        Logger::error("Temperature value read out of bounds");
-        return false;
-      }
-      else
-        return true;
-      break;
-    case HUMIDITY:
-      HistoricalData.humidity[0] = HistoricalData.humidity[1];
-      HistoricalData.humidity[1] = *(float *)data;
-      if (HistoricalData.humidity[0] == 0)
-        return true;
-      if (*(float *)data > (((HistoricalData.humidity[0] + HistoricalData.humidity[1]) / 2.0) * (float)ValidationFactor))
-      {
-        Logger::error("Humidity value read out of bounds");
-        return false;
-      }
-      else
-        return true;
+      HistoricalData.pm10[1] = data;
       break;
     case VOC_INDEX:
       HistoricalData.voc_index[0] = HistoricalData.voc_index[1];
-      HistoricalData.voc_index[1] = *(unsigned long *)data;
-      if (HistoricalData.voc_index[0] == 0)
-        return true;
-      if (*(unsigned long *)data > (((HistoricalData.voc_index[0] + HistoricalData.voc_index[1]) / 2) * ValidationFactor))
-      {
-        Logger::error("VOC Index value read out of bounds");
-        return false;
-      }
-      else
-        return true;
+      HistoricalData.voc_index[1] = data;
       break;
-    default:
-      Logger::error("Data Valididater: Invalid type specified");
-      return false;
+    case TEMPERATURE:
+      HistoricalData.temperature[0] = HistoricalData.temperature[1];
+      HistoricalData.temperature[1] = data;
+      break;
+    case HUMIDITY:
+      HistoricalData.humidity[0] = HistoricalData.humidity[1];
+      HistoricalData.humidity[1] = data;
+      break;
   }
+
+  return true;
 }
 
 //////////////////////////////////////////////////
@@ -505,7 +573,7 @@ void sgp40_Start(void)
     while (1)
     {
       delay(10);
-      cnt++; 
+      cnt++;
       if (cnt > 100000)
         digitalWrite(BUILTIN_LED, HIGH);
       else
@@ -519,15 +587,15 @@ void sgp40_Start(void)
   Logger::notice(logMsg);
 }
 
-void sgp40_Read(void)
+void sgp40_Read(bool FirstRun)
 {
   uint16_t sraw;
   int32_t voc_index;
   sensors_event_t humidity, temp;
-  bool err;
+  bool err = false;
 
   shtc3.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
-  
+
   snprintf(logMsg, LOGMSG_LEN, "Temperature:     %.2f degrees C", temp.temperature);
   Logger::notice(logMsg);
   snprintf(logMsg, LOGMSG_LEN, "Humidity:        %.2f%% rH", humidity.relative_humidity);
@@ -540,6 +608,18 @@ void sgp40_Read(void)
   voc_index = sgp.measureVocIndex(temp.temperature, humidity.relative_humidity);
   snprintf(logMsg, LOGMSG_LEN, "VOC Index:       %d", voc_index);
   Logger::notice(logMsg);
+
+
+  if (FirstRun)
+  {
+    HistoricalData.temperature[0] = (unsigned long)(temp.temperature);
+    HistoricalData.temperature[1] = (unsigned long)(temp.temperature);
+    HistoricalData.humidity[0] = (unsigned long)(humidity.relative_humidity);
+    HistoricalData.humidity[1] = (unsigned long)(humidity.relative_humidity);
+    HistoricalData.voc_index[0] = voc_index;
+    HistoricalData.voc_index[1] = voc_index;
+    return;
+  }
 
   if (validateReading(&temp.temperature, TEMPERATURE))
   {
@@ -558,7 +638,7 @@ void sgp40_Read(void)
   }
 
   if (err == false)
-    Logger::error("Error while publiching MQTT data");
+    Logger::error("Error while publishing MQTT data");
   else
     Logger::verbose("Published SHTC3 & SGP40 data via MQTT");
 }
@@ -579,11 +659,11 @@ void hpma_Start(void)
   start_autosend();
 }
 
-void hpma_Read(void)
+void hpma_Read(bool FirstRun)
 {
   int pm25;
   int pm10;
-  bool err;
+  bool err = false;
 
   if (!receive_measurement(&pm25, &pm10))
   {
@@ -596,6 +676,16 @@ void hpma_Read(void)
   Logger::notice(logMsg);
   snprintf(logMsg, LOGMSG_LEN, "PM 10:           %d ug/m3", pm10);
   Logger::notice(logMsg);
+
+
+  if (FirstRun)
+  {
+    HistoricalData.pm25[0] = pm25;
+    HistoricalData.pm25[1] = pm25;
+    HistoricalData.pm10[0] = pm10;
+    HistoricalData.pm10[1] = pm10;
+    return;
+  }
 
   if (validateReading(&pm25, PM25))
   {
