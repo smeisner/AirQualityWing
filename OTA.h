@@ -27,6 +27,7 @@ void setupOTA(const char* nameprefix, const char* ssid, const char* password) {
   char *fullhostname = new char[maxlen];
   uint8_t mac[6];
   WiFi.macAddress(mac);
+  WiFi.setHostname(nameprefix);
   snprintf(fullhostname, maxlen, "%s-%02x%02x%02x", nameprefix, mac[3], mac[4], mac[5]);
   ArduinoOTA.setHostname(fullhostname);
   delete[] fullhostname;

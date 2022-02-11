@@ -5,7 +5,7 @@ Air Quality Wing with HUZZAH32 uController
 
 ## Description
 
-The HUZZAH32 board is one of the few that has the Fetaher foot print and\
+The HUZZAH32 board is one of the few that has the Feather foot print and\
 supplies onboard wifi. The wifi allows for MQTT publiching to a broker.
 
 Info on the HUZZAH32 can be found anywhere on the internet, but Adafruit has some good details.
@@ -45,6 +45,10 @@ Code I used to process the HPM info came from:
 - https://medium.com/@boonsanti/esp32-air-quality-measurement-pm2-5-pm10-with-honeywell-hpma115s0-55f411d08fca
 
 
+For board support for the Adafruit HUZZAH32, the following must be used:
+- https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_dev_index.json
+
+
 ## Arduino Library Requirements
 
 This code relies on the following libraries:
@@ -65,30 +69,40 @@ This code relies on the following libraries:
        https://github.com/adafruit/Adafruit_Sensor
 * Felix Galindo's HPMA Sensor
    - Manually download zip from repo and add to Arduino IDE\
-     https://github.com/felixgalindo/HPMA115S0.git\ \
-     [Possible alternative: https://github.com/jedp/PMSensor-HPMA115]
+     https://github.com/felixgalindo/HPMA115S0.git \
+     [Possible alternative: https://github.com/jedp/PMSensor-HPMA115]\
+     Instructions to manually add libraries:
+     - https://docs.arduino.cc/software/ide-v1/tutorials/installing-libraries
 * To support OTA updates;
-   * ArduinoOTA
-     - Installed by name via the IDE Library Manager\
+   - ArduinoOTA
+     - Installed by name via the IDE Library Manager
        https://github.com/jandrassy/ArduinoOTA
-   * TelnetStream
-     - Installed by name via IDE Library Manager\
+   - TelnetStream
+     - Installed by name via IDE Library Manager
        https://github.com/jandrassy/TelnetStream
-   * Logger
-     - Installed by name via IDE Library Manager\
+   - Logger
+     - Installed by name via IDE Library Manager
        https://github.com/bakercp/Logger
+* Uptime Library:
+   - Installed by name via IDE Manager
+       https://github.com/YiannisBourkelis/Uptime-Library
+* Support for Adafruit Feather OLED
+   - Installed by name via IDE Manager
+     Name: Adafruit SSD1306
+     https://github.com/adafruit/Adafruit_SSD1306
+   - Installed by name in IDE Manager
+     Name: Adafruit GFX Library
+     https://github.com/adafruit/Adafruit-GFX-Library
 
 ## I2C Addresses:
 | Device | I2C Address |
 | ------ | ----------- |
-| SHTC3 | 0x70 |
+| OLED  | 0x3c |
 | SGP40 | 0x59 |
+| SHTC3 | 0x70 |
 
  
 ## To do:
  - Look at power usage and minimize wherever possible
  - Use "EEPROM" for config storage
- - Add support for SSD display
- - If operating on battery, turn on wifi only when needed\
-   ...and turn off fan in HPM until reading taken\
-   ...but this will effectively disable the telnet console & OTA updates
+ - If operating on battery, turn on wifi only when needed
