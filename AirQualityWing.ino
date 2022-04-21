@@ -73,7 +73,7 @@ const char ssid[] = SECRET_SSID;
 const char password[] = SECRET_PASS;
 const char mqtt_server[] = SECRET_MQTT_BROKER;
 
-#define VERSION "v2.0"
+#define VERSION "v2.2"
 #define BANNER "HUZZAH32 Feather/Air Quality Wing -- " VERSION
 
 // Global device structs
@@ -218,7 +218,7 @@ typedef struct {
 } HISTORICAL_DATA;
 
 HISTORICAL_DATA PROGMEM HistoricalData;
-int PROGMEM ValidationFactor = 20;
+int PROGMEM ValidationFactor = 200;
 
 //
 // Support for event log buffer recall
@@ -228,6 +228,20 @@ int PROGMEM RecallPosition = 0;
 // Allocate 4 extra bytes to allow for a safety buffer
 char PROGMEM RecallBuffer[RECALL_BUFFER_LEN+4];
 
+//
+// Track error statistics
+//
+typedef struct {
+  unsigned int hardware;
+  unsigned int checksum;
+  unsigned int data_range;
+  unsigned int mqtt;
+  unsigned int timeout;
+  unsigned int wifi;
+  unsigned int internal;
+} ERRORS;
+
+ERRORS PROGMEM ErrorStats;
 
 //////////////////////////////////////////////////
 ///                                            ///
@@ -243,6 +257,9 @@ void setup()
 
   Serial.begin(115200);
   while (!Serial) delay(100);
+
+  // Set all error counts to 0
+  memset (&ErrorStats, 0, sizeof(ERRORS));
 
   // Toggle LED to show a pattern in case the OTA/wifi setup doesn't work
   digitalWrite(BUILTIN_LED, LOW);
@@ -304,7 +321,7 @@ void setup()
   updateBatteryVoltage();
 
   // Clear all historical data before any readings are taken
-  memset (&HistoricalData, sizeof(HISTORICAL_DATA), 0);
+  memset (&HistoricalData, 0, sizeof(HISTORICAL_DATA));
 
   Logger::verbose("Enabling AQW 5V supply...");
   pinMode(AQW_5V_EN_PIN, OUTPUT);
@@ -563,6 +580,14 @@ void AQWStatus()
   TelnetStream.print(F("  VOC Index:    ")); TelnetStream.println(voc_index);
   TelnetStream.print(F("  LiPo Battery: ")); TelnetStream.print(batteryVoltage); TelnetStream.println(F("V"));
   TelnetStream.print(F("  LiPo Battery: ")); TelnetStream.print(batteryPercentage); TelnetStream.println(F("%"));
+  TelnetStream.println(F("Errors: "));
+  TelnetStream.print(F("  Hardware:     ")); TelnetStream.println(ErrorStats.hardware);
+  TelnetStream.print(F("  Timeouts:     ")); TelnetStream.println(ErrorStats.timeout);
+  TelnetStream.print(F("  Checksum:     ")); TelnetStream.println(ErrorStats.checksum);
+  TelnetStream.print(F("  Data Range:   ")); TelnetStream.println(ErrorStats.data_range);
+  TelnetStream.print(F("  MQTT:         ")); TelnetStream.println(ErrorStats.mqtt);
+  TelnetStream.print(F("  Wifi:         ")); TelnetStream.println(ErrorStats.wifi);
+  TelnetStream.print(F("  Internal:     ")); TelnetStream.println(ErrorStats.internal);
   TelnetStream.println(F("=================================================="));
 }
 
@@ -633,6 +658,11 @@ void CheckTelnet()
       TelnetStream.println(F("Most recent status: "));
       AQWStatus();
       break;
+    case 'Z':
+    case 'z':
+      TelnetStream.println(F("Zeroing stats"));
+      memset (&ErrorStats, 0, sizeof(ERRORS));
+      break;
     case 'H':
     case 'h':
     case '?':
@@ -643,28 +673,41 @@ void CheckTelnet()
       TelnetStream.println(F("      (Verbose, Notice, Warning, Error, Fatal)"));
       TelnetStream.println(F("    D - Dump most recent log"));
       TelnetStream.println(F("    S - Status"));
+      TelnetStream.println(F("    Z - Clear statistics counts"));
       break;
   }
 //@@@  if (ch != NULL)
 //    TelnetStream.begin();
 }
 
-void setup_wifi()
+void setup_wifi(unsigned long timeout)
 {
+  unsigned long expiration = millis() + timeout;
+  unsigned long currentMillis = millis();
   delay(10);
   WiFi.begin(ssid, password);
   Logger::warning("Wifi connecting.");
-  while (WiFi.status() != WL_CONNECTED)
+  while ((WiFi.status() != WL_CONNECTED) && (currentMillis < expiration))
   {
     delay(500);
-    Logger::warning(".");
+    Logger::verbose(".");
     // No need to call ArduinoOTA.handle() since we're not connected to wifi
+    currentMillis = millis();
   }
-  Logger::notice("Wifi connected.");
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Logger::error("Wifi failed to connect");
+  }
+  else
+  {
+    Logger::notice("Wifi connected.");
+  }
 }
 
 void connectMqtt()
 {
+  int attempts;
+
   if (mqttClient.connected())
   {
     Logger::warning("MQTT already connected: Reestablishing");
@@ -673,8 +716,18 @@ void connectMqtt()
 
   // Loop until we're reconnected
   Logger::verbose("MQTT connecting.");
+  attempts = 0;
   while (!mqttClient.connected())
   {
+    attempts++;
+    if (attempts > 5)
+    {
+      attempts = 0;
+      Logger::error("Resetting Wifi connection after 5 attempts to reconnect to MQTT");
+      WiFi.disconnect();
+      ErrorStats.wifi++;
+      setup_wifi(5000);
+    }
     // Attempt to connect
     if (mqttClient.connect("ESP32-AQW-Client"))
     {
@@ -688,6 +741,7 @@ void connectMqtt()
       for (int n=0; n < 500; n++) { if ((n % 10) == 0) messagePump(); delay (10); }
       digitalWrite(BUILTIN_LED, LOW);
       Logger::error("MQTT cannot connect.");
+      ErrorStats.mqtt++;
     }
     messagePump();
   }
@@ -698,35 +752,48 @@ void disconnectMqtt()
     mqttClient.disconnect();
 }
 
-void reconnectMqtt()
-{
-  if (mqttClient.connected())
-  {
-    Logger::warning("Reestablishing MQTT connection");
-    mqttClient.disconnect();
-  }
-
-  // Loop until we're reconnected
-  Logger::notice("MQTT connecting.");
-  while (!mqttClient.connected())
-  {
-    // Attempt to connect
-    if (mqttClient.connect("ESP32-AQW-Client"))
-    {
-      digitalWrite(BUILTIN_LED, HIGH);
-      Logger::notice("MQTT connected.");
-    }
-    else
-    {
-      // Wait 5 seconds before retrying
-      //delay(5000);
-      for (int n=0; n < 500; n++) { if ((n % 10) == 0) messagePump(); delay (10); }
-      digitalWrite(BUILTIN_LED, LOW);
-      Logger::error("MQTT cannot connect.");
-    }
-    messagePump();
-  }
-}
+//void reconnectMqtt()
+//{
+//  int attempts;
+//
+//  if (mqttClient.connected())
+//  {
+//    Logger::warning("Reestablishing MQTT connection");
+//    mqttClient.disconnect();
+//  }
+//
+//  // Loop until we're reconnected
+//  Logger::notice("MQTT connecting.");
+//  attempts = 0;
+//  while (!mqttClient.connected())
+//  {
+//    attempts++;
+//    if (attempts > 5)
+//    {
+//      attempts = 0;
+//      Logger::error("Resetting Wifi connection after 10 attempts to reconnect to MQTT");
+//      WiFi.disconnect();
+//      ErrorStats.wifi++;
+//      setup_wifi(5000);
+//    }
+//    // Attempt to connect
+//    if (mqttClient.connect("ESP32-AQW-Client"))
+//    {
+//      digitalWrite(BUILTIN_LED, HIGH);
+//      Logger::notice("MQTT connected.");
+//    }
+//    else
+//    {
+//      // Wait 5 seconds before retrying
+//      //delay(5000);
+//      for (int n=0; n < 500; n++) { if ((n % 10) == 0) messagePump(); delay (10); }
+//      digitalWrite(BUILTIN_LED, LOW);
+//      Logger::error("MQTT cannot connect.");
+//      ErrorStats.mqtt++;
+//    }
+//    messagePump();
+//  }
+//}
 
 
 //////////////////////////////////////////////////
@@ -861,7 +928,7 @@ void tqInit()
 {
   tqTail = 0;
   tqHead = 0;
-  memset (tq, sizeof(TQENTRY) * TQSIZE, 0);
+  memset (tq, 0, sizeof(TQENTRY) * TQSIZE);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0,0);
@@ -920,6 +987,7 @@ bool validateReading(void *data_r, DataType type)
       type != TEMPERATURE && type != HUMIDITY)
   {
     Logger::error("Data Valididater: Invalid type specified");
+    ErrorStats.internal++;
     return false;
   }
 
@@ -965,7 +1033,8 @@ bool validateReading(void *data_r, DataType type)
   //
   if (data > max)
   {
-    test(Logger::ERROR, "", "Initial %s value read is beyond max", str.c_str());
+    test(Logger::ERROR, "", "Initial %s value read is beyond max: %d > %d (data vs max)", str.c_str(), data, max);
+    ErrorStats.data_range++;
     return false;
   }
 
@@ -981,7 +1050,8 @@ bool validateReading(void *data_r, DataType type)
   //
   if (data > (avg * ValidationFactor))
   {
-    test(Logger::ERROR, "", "%s data value read out of bounds", str.c_str());
+    test(Logger::ERROR, "", "%s data value read out of bounds: %d > %d (data vs max)", str.c_str(), data, (avg * ValidationFactor));
+    ErrorStats.data_range++;
     return false;
   }
 
@@ -1063,6 +1133,7 @@ void shtc3_Start(void)
   if (! shtc3.begin())
   {
     Logger::error("Couldn't find SHTC3");
+    ErrorStats.hardware++;
 #ifdef AQW_OLED
     if (AqwOled)
     {
@@ -1102,6 +1173,7 @@ void sgp40_Start(void)
   {
     int cnt=0;
     Logger::error("SGP40 sensor not found :(");
+    ErrorStats.hardware++;
 #ifdef AQW_OLED
     if (AqwOled)
     {
@@ -1123,7 +1195,7 @@ void sgp40_Start(void)
     }
   }
 
-  memset (SgpSerial, SGP_SERIAL_LEN, 0);
+  memset (SgpSerial, 0, SGP_SERIAL_LEN);
   snprintf (SgpSerial, SGP_SERIAL_LEN - 1, "%02x%02x%02x",
     sgp.serialnumber[0], sgp.serialnumber[1], sgp.serialnumber[2]);
   snprintf(logMsg, LOGMSG_LEN, "Found SGP40 serial # %s", SgpSerial);
@@ -1180,9 +1252,14 @@ void sgp40_Read(bool FirstRun)
     err = true;
 
   if (err == true)
+  {
     Logger::error("Error while publishing SHTC3 & SGP40 data via MQTT");
+    ErrorStats.mqtt++;
+  }
   else
+  {
     Logger::verbose("Published SHTC3 & SGP40 data via MQTT");
+  }
 }
 
 //////////////////////////////////////////////////
@@ -1210,7 +1287,9 @@ void hpma_Read(bool FirstRun)
   if (!receive_measurement(&pm25, &pm10))
   {
     digitalWrite(BUILTIN_LED, 0);
-    Logger::warning("Cannot receive data from HPMA115S0!");
+    Logger::warning("Cannot receive data from HPMA115! Resetting HPMA sensor...");
+    HPMA115S0.end();
+    hpma_Start();
     return;
   }
 
@@ -1244,10 +1323,14 @@ void hpma_Read(bool FirstRun)
   }
 
   if (err == true)
-    Logger::error("Error while publishing HPMA115S0 data via MQTT");
+  {
+    Logger::error("Error while publishing HPMA115 data via MQTT");
+    ErrorStats.mqtt++;
+  }
   else
-    Logger::verbose("Published HPMA115S0 data via MQTT");
-
+  {
+    Logger::verbose("Published HPMA115 data via MQTT");
+  }
 }
 
 bool receive_measurement (int *pm25, int *pm10)
@@ -1256,7 +1339,8 @@ bool receive_measurement (int *pm25, int *pm10)
   while ((HPMA115S0.available() < 32) && (millis() - start < MAX_AQW_WAIT * 1000 + 6000)) messagePump();
   if (HPMA115S0.available() < 32)
   {
-    Logger::warning("Timeout reading from HPMA1150");
+    Logger::warning("Timeout reading from HPMA115");
+    ErrorStats.timeout++;
     return false;
   }
   byte HEAD0 = HPMA115S0.read();
@@ -1278,7 +1362,8 @@ bool receive_measurement (int *pm25, int *pm10)
   }
   if (HEAD0 != 0x42)
   {
-    Logger::warning("Timeout or Incorrect data read from HPMA1150 sensor");
+    Logger::warning("Timeout or Incorrect data read from HPMA115 sensor");
+    ErrorStats.timeout++;
     return false;
   }
   if (HEAD0 == 0x42 && HEAD1 == 0x4D)
@@ -1315,13 +1400,15 @@ bool receive_measurement (int *pm25, int *pm10)
     byte CheckSumL = HPMA115S0.read();
     if (((HEAD0 + HEAD1 + LENH + LENL + Data0H + Data0L + Data1H + Data1L + Data2H + Data2L + Data3H + Data3L + Data4H + Data4L + Data5H + Data5L + Data6H + Data6L + Data7H + Data7L + Data8H + Data8L + Data9H + Data9L + Data10H + Data10L + Data11H + Data11L + Data12H + Data12L) % 256) != CheckSumL)
     {
-      Logger::warning("HPMA115S0 Checksum fail");
+      Logger::warning("HPMA115 Checksum fail");
+      ErrorStats.checksum++;
       return false;
     }
     *pm25 = (Data1H * 256) + Data1L;
     *pm10 = (Data2H * 256) + Data2L;
     return true;
   }
+  ErrorStats.timeout++;
   return false;
 }
  
@@ -1341,12 +1428,13 @@ bool start_autosend(void)
   if (HPMA115S0.available() < 2)
   {
     int cnt=0;
-    Logger::fatal("Cannot communicate with the HPMA115S0!");
+    Logger::fatal("Cannot communicate with the HPMA115!");
+    ErrorStats.hardware++;
 #ifdef AQW_OLED
     if (AqwOled)
     {
       display.setCursor(0,0);
-      display.print(F("HPMA115S0 Sensor Failure"));
+      display.print(F("HPMA115 Sensor Failure"));
       display.display();
     }
 #endif
@@ -1375,8 +1463,14 @@ bool start_autosend(void)
   else if ((read1 == 0x96) && (read2 == 0x96))
   {
     // NACK
+    Logger::notice("Unexpected data read from HPMA115");
+    ErrorStats.hardware++;
     return 0;
   }
   else
+  {
+    Logger::notice("No data read from HPMA115");
+    ErrorStats.hardware++;
     return 0;
+  }
 }
