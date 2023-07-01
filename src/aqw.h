@@ -1,7 +1,7 @@
 #ifndef __AQW_H__
 #define __AQW_H__
 
-#define VERSION "v1.0"
+#define VERSION "v3.0"
 #define BANNER "Particle Argon/Air Quality Wing -- " VERSION
 
 
