@@ -1,16 +1,19 @@
 # AirQualityWing
 
 Air Quality Monitor based on Wing board from Jared Wolff\
-Air Quality Wing with HUZZAH32 uController
+Air Quality Wing with Particle Argon uController
 
 ## Description
 
-The HUZZAH32 board is one of the few that has the Feather foot print and\
+The Particle Argon board is one of the few that has the Feather foot print and\
 supplies onboard wifi. The wifi allows for MQTT publiching to a broker.
 
-Info on the HUZZAH32 can be found anywhere on the internet, but Adafruit has some good details.
+Info on the Particle Argon can be found anywhere on the internet, but Adafruit has some good details.
 - https://learn.adafruit.com/adafruit-huzzah32-esp32-feather
 - https://makeabilitylab.github.io/physcomp/esp32/assets/images/AdafruitHuzzah32PinDiagram.png
+
+OLED display used:
+- https://www.adafruit.com/product/3045
 
 The Air Quality Wing (aka, AQW) is a Feather board desgined and built by Jared Wolff. This makes\
 for a nice plug and play...especialy with the 3D printed case he made for it.
@@ -47,6 +50,9 @@ Code I used to process the HPM info came from:
 
 For board support for the Adafruit HUZZAH32, the following must be used:
 - https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_dev_index.json
+
+
+Note: Need to upload STL files for modified cases
 
 
 ## Arduino Library Requirements
@@ -104,5 +110,4 @@ This code relies on the following libraries:
  
 ## To do:
  - Look at power usage and minimize wherever possible
- - Use "EEPROM" for config storage
- - If operating on battery, turn on wifi only when needed
+ - Implement a circular buffer for activity recall
